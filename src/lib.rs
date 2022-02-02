@@ -1,10 +1,23 @@
+//!
+//! [![Version](https://img.shields.io/crates/v/nompdf)](https://crates.io/crates/nompdf)
+//! [![Downloads](https://img.shields.io/crates/d/nompdf)](https://crates.io/crates/nompdf)
+//! [![License](https://img.shields.io/crates/l/nompdf)](https://crates.io/crates/nompdf)
+//! ![Rust](https://github.com/edg-l/nompdf/workflows/Rust/badge.svg)
+//! [![Docs](https://docs.rs/nompdf/badge.svg)](https://docs.rs/nompdf)
+//!
+//! ## A PDF parser written in Rust and using nom.
+//!
+//! Using [PDF Reference third edition](https://www.adobe.com/content/dam/acom/en/devnet/pdf/pdfs/pdf_reference_archives/PDFReference.pdf) as reference.
+
+#![forbid(unsafe_code)]
+
 use nom::branch::alt;
-use nom::bytes::complete::{is_not, take_till, take_until, take_while, take_while1};
+use nom::bytes::complete::{take_till, take_while, take_while1};
 use nom::character::complete::hex_digit1;
-use nom::combinator::{eof, map_res, recognize, value};
+use nom::combinator::{eof, map_res, recognize};
 use nom::error::{Error, ErrorKind, ParseError};
 use nom::number::complete;
-use nom::sequence::{delimited, pair, preceded};
+use nom::sequence::{delimited, pair};
 use nom::{bytes::complete::tag, character::complete::char, character::complete::digit1, IResult};
 use std::{collections::HashMap, fmt::Debug, io::Read, ops::RangeInclusive};
 
@@ -31,12 +44,12 @@ pub enum Either<L, R> {
 pub struct NameObject<'a>(pub &'a str);
 
 /// A PDF dictionary object.
-type DictionaryObject<'a> = HashMap<NameObject<'a>, Object<'a>>;
+pub type DictionaryObject<'a> = HashMap<NameObject<'a>, Object<'a>>;
 
-type HexString<'a> = &'a str;
+pub type HexString<'a> = &'a str;
 
 /// An indirect object reference.
-// Represented in PDFs like "12 0 R"
+/// Represented in PDFs like "12 0 R"
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub struct IndirectReference {
     pub number: u64,
@@ -302,8 +315,7 @@ impl<'a> Object<'a> {
             delimited(tag("<"), take_until_unbalanced('<', '>'), tag(">"))(inp)?;
 
         // Remove remaining <>
-        let (_, value) =
-            delimited(tag("<"), take_until_unbalanced('<', '>'), tag(">"))(value)?;
+        let (_, value) = delimited(tag("<"), take_until_unbalanced('<', '>'), tag(">"))(value)?;
 
         let mut dict = DictionaryObject::new();
 
