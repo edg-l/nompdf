@@ -140,7 +140,7 @@ impl Header {
 
 // Adapted from https://stackoverflow.com/questions/70630556/parse-allowing-nested-parentheses-in-nom
 // https://github.com/Geal/nom/issues/1253
-pub fn take_until_unbalanced(
+fn take_until_unbalanced(
     opening_bracket: char,
     closing_bracket: char,
 ) -> impl Fn(&str) -> IResult<&str, &str> {
