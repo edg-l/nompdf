@@ -1,7 +1,15 @@
 [package]
 name = "nompdf"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
+authors = ["Edgar <git@edgarluque.com>"]
+description = "A PDF parser written in Rust using nom."
+repository = "https://github.com/edg-l/nompdf/"
+license = "MIT OR Apache-2.0"
+keywords = ["pdf", "nom", "parser"]
+categories = ["parser-implementations"]
+documentation = "https://docs.rs/nompdf"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
