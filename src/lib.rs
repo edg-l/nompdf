@@ -15,24 +15,19 @@
 use nom::branch::alt;
 use nom::bytes::complete::{take_till, take_while, take_while1};
 use nom::character::complete::hex_digit1;
+use nom::character::streaming::alpha1;
 use nom::combinator::{eof, map_res, recognize};
 use nom::error::{Error, ErrorKind, ParseError};
 use nom::number::complete;
-use nom::sequence::{delimited, pair};
+use nom::sequence::{delimited, pair, tuple};
+use nom::ParseTo;
 use nom::{bytes::complete::tag, character::complete::char, character::complete::digit1, IResult};
 use std::{collections::HashMap, fmt::Debug, io::Read, ops::RangeInclusive};
 
 // TODO: change strings to use a new type and add methods to decode/encode to pdf string format.
 
 /// What PDF considers white space characters.
-pub const WHITE_SPACE_CHARS: [char; 6] = [
-    0x00 as char,
-    0x09 as char,
-    0x0A as char,
-    0x0C as char,
-    0x0D as char,
-    0x20 as char,
-];
+pub const WHITE_SPACE_CHARS: [u8; 6] = [0x00, 0x09, 0x0A, 0x0C, 0x0D, 0x20];
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Hash)]
 pub enum Either<L, R> {
@@ -41,7 +36,7 @@ pub enum Either<L, R> {
 }
 
 /// A name object.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub struct NameObject<'a>(pub &'a str);
 
 /// A PDF dictionary object.
@@ -66,7 +61,7 @@ pub struct Header {
     pub minor: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Object<'a> {
     Boolean(bool),
     Integer(i32),
@@ -115,7 +110,7 @@ pub struct Trailer<'a> {
 }
 
 /// The parsed PDF file.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PDF<'a> {
     pub header: Header,
     pub objects: Vec<Object<'a>>,
@@ -126,16 +121,28 @@ pub struct PDF<'a> {
 }
 
 impl Header {
-    fn from_str(inp: &str) -> IResult<&str, Header> {
-        let (inp, _) = tag("%PDF-")(inp)?;
-        let mut parse_digit = map_res(digit1, |s: &str| s.parse::<u32>());
+    fn parse(inp: &[u8]) -> IResult<&[u8], Header> {
+        let (inp, _) = tag(b"%PDF-")(inp)?;
+        // Take a str digit and convert it to u32.
 
-        let (inp, major) = parse_digit(inp)?;
+        let (inp, major) = take_digit_u32(inp)?;
         let (inp, _) = char('.')(inp)?;
-        let (inp, minor) = parse_digit(inp)?;
+        let (inp, minor) = take_digit_u32(inp)?;
 
         Ok((inp, Header { major, minor }))
     }
+}
+
+fn take_digit_u32(inp: &[u8]) -> IResult<&[u8], u32> {
+    let (inp, digit) = map_res(digit1, |digit| std::str::from_utf8(digit))(inp)?;
+    let num = u32::from_str_radix(digit, 10).expect("to be a digit and thus a valid u32");
+    Ok((inp, num))
+}
+
+fn take_digit_i32(inp: &[u8]) -> IResult<&[u8], i32> {
+    let (inp, digit) = map_res(digit1, |digit| std::str::from_utf8(digit))(inp)?;
+    let num = i32::from_str_radix(digit, 10).expect("to be a digit and thus a valid u32");
+    Ok((inp, num))
 }
 
 // Adapted from https://stackoverflow.com/questions/70630556/parse-allowing-nested-parentheses-in-nom
@@ -191,49 +198,49 @@ fn take_until_unbalanced(
 
 /// Returns everything until a whitespace is found.
 #[inline]
-fn till_whitespace(inp: &str) -> IResult<&str, &str> {
-    take_till(|c: char| WHITE_SPACE_CHARS.contains(&c))(inp)
+fn till_whitespace(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+    take_till(|c| WHITE_SPACE_CHARS.contains(&c))(inp)
 }
 
 /// Returns all the whitespace until a non-whitespace character is found.
 #[inline]
-fn skip_whitespace(inp: &str) -> IResult<&str, &str> {
-    take_while(|c: char| WHITE_SPACE_CHARS.contains(&c))(inp)
+fn skip_whitespace(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+    take_while(|c| WHITE_SPACE_CHARS.contains(&c))(inp)
 }
 
 /// Most objects should be separated by whitespace or eof, this is needed to ensure "nullthisisbad"
 /// doesn't simply match null for a null object and then ignores the rest of the word.
 #[inline]
-fn take_whitespace_eof(inp: &str) -> IResult<&str, &str> {
-    alt((eof, take_while1(|c: char| WHITE_SPACE_CHARS.contains(&c))))(inp)
+fn take_whitespace_eof(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+    alt((eof, take_while1(|c| WHITE_SPACE_CHARS.contains(&c))))(inp)
 }
 
 // General rule of individual parsers: Assume there is no whitespace at the start.
 impl<'a> Object<'a> {
-    fn parse_bool(inp: &'a str) -> IResult<&'a str, Object<'a>> {
+    fn parse_bool(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
         let (inp, res) = alt((tag("true"), tag("false")))(inp)?;
-        let value = res.eq_ignore_ascii_case("true");
+        let value = res.eq_ignore_ascii_case(b"true");
         let (inp, _) = take_whitespace_eof(inp)?;
         Ok((inp, Object::Boolean(value)))
     }
 
     // 123 43445 +17 −98 0
-    fn parse_integer(inp: &'a str) -> IResult<&'a str, Object<'a>> {
-        let (inp, value) = map_res(
+    fn parse_integer(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+        let (inp, value) = tuple((
             alt((
-                recognize(pair(tag("+"), digit1)),
-                recognize(pair(tag("-"), digit1)),
+                recognize(pair(tag(b"+"), digit1)),
+                recognize(pair(tag(b"-"), digit1)),
                 recognize(digit1),
             )),
-            |s: &str| s.parse::<i32>(),
-        )(inp)?;
+            take_digit_i32,
+        ))(inp)?;
 
         let (inp, _) = take_whitespace_eof(inp)?;
 
-        Ok((inp, Object::Integer(value)))
+        Ok((inp, Object::Integer(value.1)))
     }
 
-    fn parse_real(inp: &'a str) -> IResult<&'a str, Object<'a>> {
+    fn parse_real(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
         let (inp, value) = complete::float(inp)?;
 
         let (inp, _) = take_whitespace_eof(inp)?;
@@ -241,16 +248,15 @@ impl<'a> Object<'a> {
         Ok((inp, Object::Real(value)))
     }
 
-    fn parse_numeric(inp: &'a str) -> IResult<&'a str, Object<'a>> {
+    fn parse_numeric(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
         let (inp, value) = till_whitespace(inp)?;
 
-        if value.contains('.') {
-            let (_, obj) = Object::parse_real(value)?;
-            Ok((inp, obj))
-        } else {
-            let (_, obj) = Object::parse_integer(value)?;
-            Ok((inp, obj))
-        }
+        let (inp, obj) = alt((
+            tuple((Object::parse_integer, eof)),
+            tuple((Object::parse_real, eof)),
+        ))(inp)?;
+
+        Ok((inp, obj.0))
     }
 
     fn parse_literal_string(inp: &'a str) -> IResult<&'a str, Object<'a>> {
@@ -390,7 +396,7 @@ mod tests {
     fn test_header() {
         for minor in 0..=7 {
             let data = format!("%PDF-1.{}", minor);
-            let (data, header) = Header::from_str(&data).unwrap();
+            let (data, header) = Header::parse(data.as_bytes()).unwrap();
             assert_eq!(header.major, 1u32);
             assert_eq!(header.minor, minor);
             assert!(data.is_empty())
