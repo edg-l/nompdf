@@ -12,17 +12,18 @@
 
 #![forbid(unsafe_code)]
 
+use error::{PDFError, PDFResult};
 use nom::branch::alt;
 use nom::bytes::complete::{take_till, take_while, take_while1};
 use nom::character::complete::hex_digit1;
-use nom::character::streaming::alpha1;
 use nom::combinator::{eof, map_res, recognize};
 use nom::error::{Error, ErrorKind, ParseError};
 use nom::number::complete;
 use nom::sequence::{delimited, pair, tuple};
-use nom::ParseTo;
 use nom::{bytes::complete::tag, character::complete::char, character::complete::digit1, IResult};
 use std::{collections::HashMap, fmt::Debug, io::Read, ops::RangeInclusive};
+
+pub mod error;
 
 // TODO: change strings to use a new type and add methods to decode/encode to pdf string format.
 
@@ -121,7 +122,7 @@ pub struct PDF<'a> {
 }
 
 impl Header {
-    fn parse(inp: &[u8]) -> IResult<&[u8], Header> {
+    fn parse(inp: &[u8]) -> PDFResult<Header> {
         let (inp, _) = tag(b"%PDF-")(inp)?;
         // Take a str digit and convert it to u32.
 
@@ -133,24 +134,22 @@ impl Header {
     }
 }
 
-fn take_digit_u32(inp: &[u8]) -> IResult<&[u8], u32> {
+fn take_digit_u32(inp: &[u8]) -> PDFResult<u32> {
     let (inp, digit) = map_res(digit1, |digit| std::str::from_utf8(digit))(inp)?;
-    let num = u32::from_str_radix(digit, 10).expect("to be a digit and thus a valid u32");
+    let num = u32::from_str_radix(digit, 10).map_err(PDFError::ParseIntError)?;
     Ok((inp, num))
 }
 
-fn take_digit_i32(inp: &[u8]) -> IResult<&[u8], i32> {
+fn take_digit_i32(inp: &[u8]) -> PDFResult<i32> {
     let (inp, digit) = map_res(digit1, |digit| std::str::from_utf8(digit))(inp)?;
-    let num = i32::from_str_radix(digit, 10).expect("to be a digit and thus a valid u32");
+    let num = i32::from_str_radix(digit, 10).map_err(PDFError::ParseIntError)?;
     Ok((inp, num))
 }
 
-// Adapted from https://stackoverflow.com/questions/70630556/parse-allowing-nested-parentheses-in-nom
-// https://github.com/Geal/nom/issues/1253
 fn take_until_unbalanced(
     opening_bracket: u8,
     closing_bracket: u8,
-) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> {
+) -> impl Fn(&[u8]) -> PDFResult<&[u8]> {
     move |i: &[u8]| {
         let mut bracket_counter = 0;
 
@@ -173,36 +172,33 @@ fn take_until_unbalanced(
         if bracket_counter == 0 {
             Ok((b"", i))
         } else {
-            Err(nom::Err::Error(Error::from_error_kind(
-                i,
-                ErrorKind::TakeUntil,
-            )))
+            Err(PDFError::NomError(ErrorKind::TakeUntil).into())
         }
     }
 }
 
 /// Returns everything until a whitespace is found.
 #[inline]
-fn till_whitespace(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+fn till_whitespace(inp: &[u8]) -> PDFResult<&[u8]> {
     take_till(|c| WHITE_SPACE_CHARS.contains(&c))(inp)
 }
 
 /// Returns all the whitespace until a non-whitespace character is found.
 #[inline]
-fn skip_whitespace(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+fn skip_whitespace(inp: &[u8]) -> PDFResult<&[u8]> {
     take_while(|c| WHITE_SPACE_CHARS.contains(&c))(inp)
 }
 
 /// Most objects should be separated by whitespace or eof, this is needed to ensure "nullthisisbad"
 /// doesn't simply match null for a null object and then ignores the rest of the word.
 #[inline]
-fn take_whitespace_eof(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+fn take_whitespace_eof(inp: &[u8]) -> PDFResult<&[u8]> {
     alt((eof, take_while1(|c| WHITE_SPACE_CHARS.contains(&c))))(inp)
 }
 
 // General rule of individual parsers: Assume there is no whitespace at the start.
 impl<'a> Object<'a> {
-    fn parse_bool(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_bool(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (inp, res) = alt((tag("true"), tag("false")))(inp)?;
         let value = res.eq_ignore_ascii_case(b"true");
         let (inp, _) = take_whitespace_eof(inp)?;
@@ -210,22 +206,22 @@ impl<'a> Object<'a> {
     }
 
     // 123 43445 +17 −98 0
-    fn parse_integer(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_integer(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (inp, value) = alt((
             recognize(pair(char('+'), digit1)),
             recognize(pair(char('-'), digit1)),
             recognize(digit1),
         ))(inp)?;
 
-        let value_str = std::str::from_utf8(value).expect("valid utf8");
-        let num = i32::from_str_radix(value_str, 10).expect("to be a digit and thus a valid u32");
+        let value_str = std::str::from_utf8(value).map_err(PDFError::InvalidUTF8)?;
+        let num = i32::from_str_radix(value_str, 10).map_err(PDFError::ParseIntError)?;
 
         let (inp, _) = take_whitespace_eof(inp)?;
 
         Ok((inp, Object::Integer(num)))
     }
 
-    fn parse_real(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_real(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (inp, value) = complete::float(inp)?;
 
         let (inp, _) = take_whitespace_eof(inp)?;
@@ -233,7 +229,7 @@ impl<'a> Object<'a> {
         Ok((inp, Object::Real(value)))
     }
 
-    fn parse_numeric(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_numeric(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (inp_outer, value) = till_whitespace(inp)?;
 
         let (_, obj) = alt((
@@ -244,34 +240,34 @@ impl<'a> Object<'a> {
         Ok((inp_outer, obj.0))
     }
 
-    fn parse_literal_string(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_literal_string(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (inp, value) = delimited(char('('), take_until_unbalanced(b'(', b')'), char(')'))(inp)?;
 
         let (inp, _) = take_whitespace_eof(inp)?;
-        let value_str = std::str::from_utf8(value).expect("valid utf8"); // todo handle better
+        let value_str = std::str::from_utf8(value).map_err(PDFError::InvalidUTF8)?;
         Ok((inp, Object::LiteralString(value_str)))
     }
 
     // <4E6F762073686D6F7A206B6120706F702E>
     /// If the final digit of a hexadecimal string is missing—that is, if there is an odd
     /// number of digits—the final digit is assumed to be 0.
-    fn parse_hex_string(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_hex_string(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (inp, value) = delimited(char('<'), hex_digit1, char('>'))(inp)?;
 
         let (inp, _) = take_whitespace_eof(inp)?;
-        let value_str = std::str::from_utf8(value).expect("valid utf8"); // todo handle better
+        let value_str = std::str::from_utf8(value).map_err(PDFError::InvalidUTF8)?;
         Ok((inp, Object::HexadecimalString(value_str)))
     }
 
-    fn parse_name(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_name(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (inp, _) = char('/')(inp)?;
         let (inp, value) = till_whitespace(inp)?;
         let (inp, _) = take_whitespace_eof(inp)?;
-        let value_str = std::str::from_utf8(value).expect("valid utf8"); // todo handle better
+        let value_str = std::str::from_utf8(value).map_err(PDFError::InvalidUTF8)?;
         Ok((inp, Object::Name(NameObject(value_str))))
     }
 
-    fn parse_array(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_array(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (original_inp, value) =
             delimited(char('['), take_until_unbalanced(b'[', b']'), char(']'))(inp)?;
 
@@ -305,7 +301,7 @@ impl<'a> Object<'a> {
         Ok((original_inp, Object::Array(objs)))
     }
 
-    fn parse_dictionary(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_dictionary(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (original_inp, value) =
             delimited(char('<'), take_until_unbalanced(b'<', b'>'), char('>'))(inp)?;
 
@@ -354,17 +350,17 @@ impl<'a> Object<'a> {
         Ok((original_inp, Object::Dictionary(dict)))
     }
 
-    fn parse_stream(inp: &'a str) -> IResult<&'a str, Object<'a>> {
+    fn parse_stream(inp: &'a str) -> PDFResult<Object<'a>> {
         todo!()
     }
 
-    fn parse_null(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+    fn parse_null(inp: &'a [u8]) -> PDFResult<Object<'a>> {
         let (inp, _) = tag(b"null")(inp)?;
         let (inp, _) = take_whitespace_eof(inp)?;
         Ok((inp, Object::Null))
     }
 
-    fn parse_indirect(inp: &'a str) -> IResult<&'a str, Object<'a>> {
+    fn parse_indirect(inp: &'a str) -> PDFResult<Object<'a>> {
         todo!()
     }
 }
