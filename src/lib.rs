@@ -148,45 +148,30 @@ fn take_digit_i32(inp: &[u8]) -> IResult<&[u8], i32> {
 // Adapted from https://stackoverflow.com/questions/70630556/parse-allowing-nested-parentheses-in-nom
 // https://github.com/Geal/nom/issues/1253
 fn take_until_unbalanced(
-    opening_bracket: char,
-    closing_bracket: char,
-) -> impl Fn(&str) -> IResult<&str, &str> {
-    move |i: &str| {
-        let mut index = 0;
+    opening_bracket: u8,
+    closing_bracket: u8,
+) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> {
+    move |i: &[u8]| {
         let mut bracket_counter = 0;
-        while let Some(n) = &i[index..].find(&[opening_bracket, closing_bracket, '\\'][..]) {
-            index += n;
-            let mut it = i[index..].chars();
-            match it.next().unwrap_or_default() {
-                c if c == '\\' => {
-                    // Skip the escape char `\`.
-                    index += '\\'.len_utf8();
-                    // Skip also the following char.
-                    let c = it.next().unwrap_or_default();
-                    index += c.len_utf8();
-                }
-                c if c == opening_bracket => {
+
+        for (index, x) in i.iter().enumerate() {
+            match *x {
+                x if x == opening_bracket => {
                     bracket_counter += 1;
-                    index += opening_bracket.len_utf8();
                 }
-                c if c == closing_bracket => {
-                    // Closing bracket.
+                x if x == closing_bracket => {
                     bracket_counter -= 1;
-                    index += closing_bracket.len_utf8();
                 }
-                // Can not happen.
-                _ => unreachable!(),
-            };
-            // We found the unmatched closing bracket.
+                _ => {}
+            }
             if bracket_counter == -1 {
                 // We do not consume it.
-                index -= closing_bracket.len_utf8();
                 return Ok((&i[index..], &i[0..index]));
             };
         }
 
         if bracket_counter == 0 {
-            Ok(("", i))
+            Ok((b"", i))
         } else {
             Err(nom::Err::Error(Error::from_error_kind(
                 i,
@@ -226,18 +211,18 @@ impl<'a> Object<'a> {
 
     // 123 43445 +17 −98 0
     fn parse_integer(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
-        let (inp, value) = tuple((
-            alt((
-                recognize(pair(tag(b"+"), digit1)),
-                recognize(pair(tag(b"-"), digit1)),
-                recognize(digit1),
-            )),
-            take_digit_i32,
+        let (inp, value) = alt((
+            recognize(pair(char('+'), digit1)),
+            recognize(pair(char('-'), digit1)),
+            recognize(digit1),
         ))(inp)?;
+
+        let value_str = std::str::from_utf8(value).expect("valid utf8");
+        let num = i32::from_str_radix(value_str, 10).expect("to be a digit and thus a valid u32");
 
         let (inp, _) = take_whitespace_eof(inp)?;
 
-        Ok((inp, Object::Integer(value.1)))
+        Ok((inp, Object::Integer(num)))
     }
 
     fn parse_real(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
@@ -249,47 +234,50 @@ impl<'a> Object<'a> {
     }
 
     fn parse_numeric(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
-        let (inp, value) = till_whitespace(inp)?;
+        let (inp_outer, value) = till_whitespace(inp)?;
 
-        let (inp, obj) = alt((
+        let (_, obj) = alt((
             tuple((Object::parse_integer, eof)),
             tuple((Object::parse_real, eof)),
-        ))(inp)?;
+        ))(value)?;
 
-        Ok((inp, obj.0))
+        Ok((inp_outer, obj.0))
     }
 
-    fn parse_literal_string(inp: &'a str) -> IResult<&'a str, Object<'a>> {
-        let (inp, value) = delimited(tag("("), take_until_unbalanced('(', ')'), tag(")"))(inp)?;
+    fn parse_literal_string(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+        let (inp, value) = delimited(char('('), take_until_unbalanced(b'(', b')'), char(')'))(inp)?;
 
         let (inp, _) = take_whitespace_eof(inp)?;
-        Ok((inp, Object::LiteralString(value)))
+        let value_str = std::str::from_utf8(value).expect("valid utf8"); // todo handle better
+        Ok((inp, Object::LiteralString(value_str)))
     }
 
     // <4E6F762073686D6F7A206B6120706F702E>
     /// If the final digit of a hexadecimal string is missing—that is, if there is an odd
     /// number of digits—the final digit is assumed to be 0.
-    fn parse_hex_string(inp: &'a str) -> IResult<&'a str, Object<'a>> {
-        let (inp, value) = delimited(tag("<"), hex_digit1, tag(">"))(inp)?;
+    fn parse_hex_string(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+        let (inp, value) = delimited(char('<'), hex_digit1, char('>'))(inp)?;
 
         let (inp, _) = take_whitespace_eof(inp)?;
-        Ok((inp, Object::HexadecimalString(value)))
+        let value_str = std::str::from_utf8(value).expect("valid utf8"); // todo handle better
+        Ok((inp, Object::HexadecimalString(value_str)))
     }
 
-    fn parse_name(inp: &'a str) -> IResult<&'a str, Object<'a>> {
-        let (inp, _) = tag("/")(inp)?;
+    fn parse_name(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+        let (inp, _) = char('/')(inp)?;
         let (inp, value) = till_whitespace(inp)?;
         let (inp, _) = take_whitespace_eof(inp)?;
-        Ok((inp, Object::Name(NameObject(value))))
+        let value_str = std::str::from_utf8(value).expect("valid utf8"); // todo handle better
+        Ok((inp, Object::Name(NameObject(value_str))))
     }
 
-    fn parse_array(inp: &'a str) -> IResult<&'a str, Object<'a>> {
+    fn parse_array(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
         let (original_inp, value) =
-            delimited(tag("["), take_until_unbalanced('[', ']'), tag("]"))(inp)?;
+            delimited(char('['), take_until_unbalanced(b'[', b']'), char(']'))(inp)?;
 
         let mut objs = Vec::new();
 
-        let (mut outer_inp, _) = take_while(|c: char| WHITE_SPACE_CHARS.contains(&c))(value)?;
+        let (mut outer_inp, _) = take_while(|c| WHITE_SPACE_CHARS.contains(&c))(value)?;
 
         loop {
             let (inp, value) = alt((
@@ -317,12 +305,12 @@ impl<'a> Object<'a> {
         Ok((original_inp, Object::Array(objs)))
     }
 
-    fn parse_dictionary(inp: &'a str) -> IResult<&'a str, Object<'a>> {
+    fn parse_dictionary(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
         let (original_inp, value) =
-            delimited(tag("<"), take_until_unbalanced('<', '>'), tag(">"))(inp)?;
+            delimited(char('<'), take_until_unbalanced(b'<', b'>'), char('>'))(inp)?;
 
         // Remove remaining <>
-        let (_, value) = delimited(tag("<"), take_until_unbalanced('<', '>'), tag(">"))(value)?;
+        let (_, value) = delimited(char('<'), take_until_unbalanced(b'<', b'>'), char('>'))(value)?;
 
         let mut dict = DictionaryObject::new();
 
@@ -370,8 +358,8 @@ impl<'a> Object<'a> {
         todo!()
     }
 
-    fn parse_null(inp: &'a str) -> IResult<&'a str, Object<'a>> {
-        let (inp, _) = tag("null")(inp)?;
+    fn parse_null(inp: &'a [u8]) -> IResult<&'a [u8], Object<'a>> {
+        let (inp, _) = tag(b"null")(inp)?;
         let (inp, _) = take_whitespace_eof(inp)?;
         Ok((inp, Object::Null))
     }
@@ -405,40 +393,40 @@ mod tests {
 
     #[test]
     fn test_object_bool() {
-        let data = "true";
+        let data = b"true";
         let (_, object) = Object::parse_bool(data).unwrap();
         assert_matches!(object, Object::Boolean(true));
 
-        let data = "false";
+        let data = b"false";
         let (_, object) = Object::parse_bool(data).unwrap();
         assert_matches!(object, Object::Boolean(false));
 
-        let data = "truee";
+        let data = b"truee";
         Object::parse_bool(data).unwrap_err();
 
-        let data = "falsee";
+        let data = b"falsee";
         Object::parse_bool(data).unwrap_err();
 
-        let data = "afalse";
+        let data = b"afalse";
         Object::parse_bool(data).unwrap_err();
     }
 
     #[test]
     fn test_object_null() {
-        let data = "null";
+        let data = b"null";
         let (_, object) = Object::parse_null(data).unwrap();
         assert_matches!(object, Object::Null);
 
-        let data = "nulla";
+        let data = b"nulla";
         Object::parse_null(data).unwrap_err();
 
-        let data = "anull";
+        let data = b"anull";
         Object::parse_null(data).unwrap_err();
     }
 
     #[test]
     fn test_object_integer() {
-        fn test_value(inp: &str, expected: i32) {
+        fn test_value(inp: &[u8], expected: i32) {
             let (_, object) = Object::parse_integer(inp).unwrap();
 
             if let Object::Integer(x) = object {
@@ -446,12 +434,12 @@ mod tests {
             }
         }
 
-        test_value("3", 3);
-        test_value("+3", 3);
-        test_value("0", 0);
-        test_value("0   ", 0);
+        test_value(b"3", 3);
+        test_value(b"+3", 3);
+        test_value(b"0", 0);
+        test_value(b"0   ", 0);
 
-        let data = "1 2 3";
+        let data = b"1 2 3";
         let (data, object) = Object::parse_integer(data).unwrap();
         assert_matches!(object, Object::Integer(1));
 
@@ -461,15 +449,15 @@ mod tests {
         let (_, object) = Object::parse_integer(&data).unwrap();
         assert_matches!(object, Object::Integer(3));
 
-        Object::parse_integer("3a").unwrap_err();
-        Object::parse_integer("-3a").unwrap_err();
-        Object::parse_integer("a").unwrap_err();
-        Object::parse_integer("a3").unwrap_err();
+        Object::parse_integer(b"3a").unwrap_err();
+        Object::parse_integer(b"-3a").unwrap_err();
+        Object::parse_integer(b"a").unwrap_err();
+        Object::parse_integer(b"a3").unwrap_err();
     }
 
     #[test]
     fn test_object_real() {
-        fn test_value(inp: &str, expected: f32) {
+        fn test_value(inp: &[u8], expected: f32) {
             let (_, object) = Object::parse_real(inp).unwrap();
 
             if let Object::Real(x) = object {
@@ -477,22 +465,22 @@ mod tests {
             }
         }
 
-        test_value("34.5", 34.5);
-        test_value(".5", 0.5);
-        test_value("4.", 4.0);
-        test_value("+123.6", 123.6);
-        test_value("-.002", -0.002);
-        test_value("0.0", 0.0);
-        test_value("0.0    ", 0.0);
+        test_value(b"34.5", 34.5);
+        test_value(b".5", 0.5);
+        test_value(b"4.", 4.0);
+        test_value(b"+123.6", 123.6);
+        test_value(b"-.002", -0.002);
+        test_value(b"0.0", 0.0);
+        test_value(b"0.0    ", 0.0);
 
-        Object::parse_real("0.0a").unwrap_err();
-        Object::parse_real("a0.0").unwrap_err();
-        Object::parse_real(".0e").unwrap_err();
+        Object::parse_real(b"0.0a").unwrap_err();
+        Object::parse_real(b"a0.0").unwrap_err();
+        Object::parse_real(b".0e").unwrap_err();
     }
 
     #[test]
     fn test_object_numeric() {
-        fn test_value_real(inp: &str, expected: f32) {
+        fn test_value_real(inp: &[u8], expected: f32) {
             let (_, object) = Object::parse_numeric(inp).unwrap();
 
             if let Object::Real(x) = object {
@@ -500,7 +488,7 @@ mod tests {
             }
         }
 
-        fn test_value_integer(inp: &str, expected: i32) {
+        fn test_value_integer(inp: &[u8], expected: i32) {
             let (_, object) = Object::parse_integer(inp).unwrap();
 
             if let Object::Integer(x) = object {
@@ -508,73 +496,73 @@ mod tests {
             }
         }
 
-        test_value_real("34.5", 34.5);
-        test_value_real(".5", 0.5);
-        test_value_real("4.", 4.0);
-        test_value_real("+123.6", 123.6);
-        test_value_real("-.002", -0.002);
-        test_value_real("0.0", 0.0);
+        test_value_real(b"34.5", 34.5);
+        test_value_real(b".5", 0.5);
+        test_value_real(b"4.", 4.0);
+        test_value_real(b"+123.6", 123.6);
+        test_value_real(b"-.002", -0.002);
+        test_value_real(b"0.0", 0.0);
 
-        test_value_integer("3", 3);
-        test_value_integer("+3", 3);
-        test_value_integer("0", 0);
+        test_value_integer(b"3", 3);
+        test_value_integer(b"+3", 3);
+        test_value_integer(b"0", 0);
     }
 
     #[test]
     fn test_object_name() {
-        fn test_value(inp: &str, expected: &str) {
+        fn test_value(inp: &[u8], expected: &str) {
             let (_, object) = Object::parse_name(inp).unwrap();
             assert_matches!(object, Object::Name(NameObject(expected)));
         }
 
-        test_value("/Adobe", "Adobe");
-        test_value("/Test ", "Test");
-        test_value("/Test2     ", "Test2");
+        test_value(b"/Adobe", "Adobe");
+        test_value(b"/Test ", "Test");
+        test_value(b"/Test2     ", "Test2");
     }
 
     #[test]
     fn test_object_literal_string() {
-        fn test_value(inp: &str, expected: &str) {
+        fn test_value(inp: &[u8], expected: &str) {
             let (_, object) = Object::parse_literal_string(inp).unwrap();
             assert_matches!(object, Object::LiteralString(expected));
         }
 
-        test_value("(hello world)", "hello world");
-        test_value("((hello world))", "(hello world)");
-        test_value("(this (is) a test)", "this (is) a test");
+        test_value(b"(hello world)", "hello world");
+        test_value(b"((hello world))", "(hello world)");
+        test_value(b"(this (is) a test)", "this (is) a test");
 
-        Object::parse_literal_string("(dsd").unwrap_err();
-        Object::parse_literal_string("(dsd)a").unwrap_err();
-        Object::parse_literal_string("(dsd)a ").unwrap_err();
+        Object::parse_literal_string(b"(dsd").unwrap_err();
+        Object::parse_literal_string(b"(dsd)a").unwrap_err();
+        Object::parse_literal_string(b"(dsd)a ").unwrap_err();
     }
 
     #[test]
     fn test_object_hex_string() {
-        fn test_value(inp: &str, expected: &str) {
+        fn test_value(inp: &[u8], expected: &str) {
             let (_, object) = Object::parse_hex_string(inp).unwrap();
             assert_matches!(object, Object::HexadecimalString(expected));
         }
 
         test_value(
-            "<4E6F762073686D6F7A206B6120706F702E>",
+            b"<4E6F762073686D6F7A206B6120706F702E>",
             "4E6F762073686D6F7A206B6120706F702E",
         );
 
         test_value(
-            "<4E6F762073686D6F7A206B6120706F702E>   ",
+            b"<4E6F762073686D6F7A206B6120706F702E>   ",
             "4E6F762073686D6F7A206B6120706F702E",
         );
 
-        Object::parse_hex_string("<AAA>a").unwrap_err();
-        Object::parse_hex_string("<AAA>a ").unwrap_err();
+        Object::parse_hex_string(b"<AAA>a").unwrap_err();
+        Object::parse_hex_string(b"<AAA>a ").unwrap_err();
     }
 
     #[test]
     fn test_object_dict() {
-        Object::parse_dictionary("<< /First true >>").unwrap();
+        Object::parse_dictionary(b"<< /First true >>").unwrap();
 
         let (_, object) = Object::parse_dictionary(
-            r#"<<  /First true
+            br#"<<  /First true
                 /SubDict << /Hello (world) >>
             >>"#,
         )
@@ -585,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_object_array() {
-        let (_, object) = Object::parse_array("[0 3.14 false (Ralph) /SomeName]").unwrap();
+        let (_, object) = Object::parse_array(b"[0 3.14 false (Ralph) /SomeName]").unwrap();
 
         match object {
             Object::Array(objects) => {
@@ -616,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_object_array_nested() {
-        let (_, object) = Object::parse_array("[0 [1 2 [3 4] 5] 6]").unwrap();
+        let (_, object) = Object::parse_array(b"[0 [1 2 [3 4] 5] 6]").unwrap();
 
         println!("Result: {:#?}", object);
 
